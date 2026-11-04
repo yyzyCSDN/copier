@@ -173,6 +173,14 @@ class _Subcommand(cli.Application):
         default=False,
         help="Skip template tasks execution",
     )
+    safe_paths = cli.Flag(
+        ["--safe-paths"],
+        default=False,
+        help=(
+            "Fail before writing anything if multiple template paths render to "
+            "conflicting destination paths"
+        ),
+    )
 
     @cli.switch(
         ["-d", "--data"],
@@ -278,6 +286,7 @@ class CopierCopySubApp(_Subcommand):
                 pretend=self.pretend,
                 quiet=self.quiet,
                 unsafe=self.unsafe,
+                safe_paths=self.safe_paths,
                 skip_tasks=self.skip_tasks,
                 ask=self.ask,
             )
@@ -364,6 +373,7 @@ class CopierRecopySubApp(_Subcommand):
                 pretend=self.pretend,
                 quiet=self.quiet,
                 unsafe=self.unsafe,
+                safe_paths=self.safe_paths,
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,
                 ask=self.ask,
@@ -459,6 +469,7 @@ class CopierUpdateSubApp(_Subcommand):
                 conflict=cast(Literal["rej", "inline"], self.conflict),
                 context_lines=self.context_lines,
                 unsafe=self.unsafe,
+                safe_paths=self.safe_paths,
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,
                 ask=self.ask,

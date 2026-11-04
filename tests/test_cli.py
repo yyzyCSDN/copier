@@ -433,6 +433,9 @@ Switches:
                                     exists.
     -s, --skip VALUE:str            Skip specified files if they exist already;
                                     may be given multiple times
+    --safe-paths                    Fail before writing anything if multiple
+                                    template paths render to conflicting
+                                    destination paths
     -w, --overwrite                 Overwrite files that already exist, without
                                     asking.
     -x, --exclude VALUE:str         A name or shell-style pattern matching files
@@ -508,6 +511,9 @@ Switches:
                                     exists.
     -s, --skip VALUE:str            Skip specified files if they exist already;
                                     may be given multiple times
+    --safe-paths                    Fail before writing anything if multiple
+                                    template paths render to conflicting
+                                    destination paths
     -x, --exclude VALUE:str         A name or shell-style pattern matching files
                                     or folders that must not be copied; may be
                                     given multiple times

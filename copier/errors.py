@@ -32,6 +32,7 @@ __all__ = [
     "MultipleConfigFilesError",
     "MultipleYieldTagsError",
     "OldTemplateWarning",
+    "PathCollisionError",
     "PathError",
     "PathNotAbsoluteError",
     "PathNotRelativeError",
@@ -113,6 +114,16 @@ class ForbiddenPathError(PathError):
 
     def __init__(self, *, path: Path, hint: str = "") -> None:
         super().__init__(f'"{path}" is forbidden' + (f"\n\n{hint}" if hint else ""))
+
+
+class PathCollisionError(UserMessageError):
+    """Several template paths render to conflicting destination paths."""
+
+    def __init__(self, collisions: Sequence[str]):
+        self.collisions = tuple(collisions)
+        super().__init__(
+            "Destination path collisions detected:\n" + "\n".join(self.collisions)
+        )
 
 
 class ExtensionNotFoundError(UserMessageError):

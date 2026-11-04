@@ -25,6 +25,7 @@ from typing import (
     Any,
     Final,
     Literal,
+    NamedTuple,
     ParamSpec,
     Self,
     TypeVar,
@@ -84,6 +85,7 @@ from .errors import (
     ExtensionNotFoundError,
     ForbiddenPathError,
     InteractiveSessionError,
+    PathCollisionError,
     TaskError,
     UnsafeTemplateError,
     UserMessageError,
@@ -97,6 +99,22 @@ _operation: ContextVar[Operation] = ContextVar("_operation")
 _pathspec_pattern: Final = (
     "gitignore" if Version(pathspec_version) >= Version("1.0.0") else "gitwildmatch"
 )
+
+
+class _RenderedPath(NamedTuple):
+    """A rendered destination path and the template path that produced it."""
+
+    src: Path
+    dst: Path
+    is_dir: bool
+
+
+class _DirectoryUse(NamedTuple):
+    """A destination path occupied as a directory."""
+
+    directory: Path
+    origin: _RenderedPath
+    implied: bool
 
 
 def as_operation(value: Operation) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]:
@@ -230,6 +248,10 @@ class Worker:
 
             See [unsafe][]
 
+        safe_paths:
+            When `True`, abort before writing any file or running any task if
+            multiple template paths render to the same destination path.
+
         skip_answered:
             When `True`, skip questions that have already been answered.
 
@@ -262,6 +284,7 @@ class Worker:
     conflict: Literal["inline", "rej"] = "inline"
     context_lines: PositiveInt = 3
     unsafe: bool = False
+    safe_paths: bool = False
     skip_answered: bool = False
     skip_tasks: bool = False
     ask: Sequence[str] = ()
@@ -463,6 +486,7 @@ class Worker:
                 "conflict": lambda: self.conflict,
                 "context_lines": lambda: self.context_lines,
                 "unsafe": lambda: self.unsafe,
+                "safe_paths": lambda: self.safe_paths,
                 "skip_answered": lambda: self.skip_answered,
                 "skip_tasks": lambda: self.skip_tasks,
                 "sep": lambda: os.sep,
@@ -795,6 +819,149 @@ class Worker:
     def match_skip(self) -> Callable[[Path], bool]:
         """Get a callable to match paths against all skip-if-exists patterns."""
         return self._path_matcher(map(self._render_string, self.all_skip_if_exists))
+
+    def _check_path_collisions(self) -> None:
+        """Ensure no two template paths render to conflicting destinations.
+
+        This runs before any destination file is written or task is executed, so
+        a failing check cannot leave partial output behind.
+
+        Raises:
+            PathCollisionError: If any destination path collision is found.
+        """
+        if not self.safe_paths:
+            return
+        collisions = self._find_path_collisions()
+        if collisions:
+            raise PathCollisionError(collisions)
+
+    def _iter_rendered_paths(self) -> Iterable[_RenderedPath]:
+        """Yield every destination path that the template would render."""
+        follow_symlinks = not self.template.preserve_symlinks
+        for src in scantree(str(self.template_copy_root), follow_symlinks):
+            src_abspath = Path(src.path)
+            if (
+                src_abspath.is_symlink()
+                and not self.template.preserve_symlinks
+                and not (src_abspath.resolve()).is_relative_to(
+                    self.template.local_abspath
+                )
+            ):
+                raise ForbiddenPathError(
+                    path=src_abspath.relative_to(self.template_copy_root)
+                )
+            src_relpath = src_abspath.relative_to(self.template.local_abspath)
+            is_symlink = src_abspath.is_symlink() and self.template.preserve_symlinks
+            is_dir = not is_symlink and src.is_dir(follow_symlinks=follow_symlinks)
+            for dst_relpath, _ in self._render_path(
+                src_abspath.relative_to(self.template_copy_root)
+            ):
+                if self.match_exclude(dst_relpath):
+                    continue
+                yield _RenderedPath(src_relpath, dst_relpath, is_dir)
+
+    def _find_path_collisions(self) -> list[str]:
+        """Find all destination path collisions among rendered template paths."""
+        rendered = list(self._iter_rendered_paths())
+        return [
+            *self._same_path_collisions(
+                rendered, lambda path: path.as_posix(), "identical", False
+            ),
+            *self._same_path_collisions(
+                rendered,
+                lambda path: path.as_posix().casefold(),
+                "case-insensitive",
+                True,
+            ),
+            *self._same_path_collisions(
+                rendered,
+                lambda path: normalize("NFC", path.as_posix()),
+                "unicode-normalized",
+                True,
+            ),
+            *self._file_directory_collisions(rendered),
+        ]
+
+    def _same_path_collisions(
+        self,
+        rendered: Sequence[_RenderedPath],
+        key: Callable[[Path], str],
+        collision_type: str,
+        distinct_targets_only: bool,
+    ) -> list[str]:
+        """Group rendered paths by an equivalence key and report collisions."""
+        groups: dict[str, list[_RenderedPath]] = {}
+        for item in rendered:
+            groups.setdefault(key(item.dst), []).append(item)
+        reports: list[str] = []
+        for group_key in sorted(groups):
+            items = groups[group_key]
+            if len(items) < 2:
+                continue
+            targets = sorted({item.dst.as_posix() for item in items})
+            if distinct_targets_only and len(targets) < 2:
+                continue
+            lines = [
+                f"  [{collision_type}] "
+                + ", ".join(f'"{target}"' for target in targets)
+            ]
+            lines.extend(f"    - {self._describe_path(item)}" for item in items)
+            reports.append("\n".join(lines))
+        return reports
+
+    def _file_directory_collisions(
+        self, rendered: Sequence[_RenderedPath]
+    ) -> list[str]:
+        """Report destination paths claimed as both a file and a directory."""
+        file_uses: dict[str, list[_RenderedPath]] = {}
+        dir_uses: dict[str, list[_DirectoryUse]] = {}
+        for item in rendered:
+            if item.is_dir:
+                dir_uses.setdefault(item.dst.as_posix(), []).append(
+                    _DirectoryUse(item.dst, item, False)
+                )
+                continue
+            file_uses.setdefault(item.dst.as_posix(), []).append(item)
+            for parent in item.dst.parents:
+                if parent == Path():
+                    break
+                dir_uses.setdefault(parent.as_posix(), []).append(
+                    _DirectoryUse(parent, item, True)
+                )
+        reports: list[str] = []
+        for target in sorted(file_uses.keys() & dir_uses.keys()):
+            lines = [f'  [file-directory] "{target}"']
+            lines.extend(
+                f"    - {self._describe_path(item)}" for item in file_uses[target]
+            )
+            lines.extend(
+                f"    - {self._describe_directory(use)}" for use in dir_uses[target]
+            )
+            reports.append("\n".join(lines))
+        return reports
+
+    @staticmethod
+    def _describe_path(item: _RenderedPath) -> str:
+        """Describe a rendered template path for collision reporting."""
+        kind = "directory" if item.is_dir else "file"
+        return (
+            f'template path "{item.src.as_posix()}" rendered to '
+            f'"{item.dst.as_posix()}" ({kind})'
+        )
+
+    @staticmethod
+    def _describe_directory(use: _DirectoryUse) -> str:
+        """Describe a directory claim for collision reporting."""
+        if not use.implied:
+            return (
+                f'template path "{use.origin.src.as_posix()}" rendered to '
+                f'"{use.directory.as_posix()}" (directory)'
+            )
+        return (
+            f'template path "{use.origin.src.as_posix()}" rendered to '
+            f'"{use.origin.dst.as_posix()}", which makes '
+            f'"{use.directory.as_posix()}" a directory'
+        )
 
     def _render_template(self) -> None:
         """Render the template in the subproject root."""
@@ -1294,6 +1461,7 @@ class Worker:
                     file=sys.stderr,
                 )
             with Phase.use(Phase.RENDER):
+                self._check_path_collisions()
                 self._render_template()
             if not self.quiet:
                 # TODO Unify printing tools
@@ -1423,6 +1591,7 @@ class Worker:
                 # https://github.com/orgs/copier-org/discussions/2345
                 exclude=[*self.template.exclude, *self.exclude],
                 ask=(),
+                safe_paths=False,
             ) as old_worker:
                 old_worker.run_copy()
             # Run pre-migration tasks
@@ -1496,6 +1665,7 @@ class Worker:
                 src_path=self.subproject.template.url,  # type: ignore[union-attr]
                 vcs_ref=self.resolved_vcs_ref,
                 ask=(),
+                safe_paths=False,
             ) as new_worker:
                 new_worker.run_copy()
             # Don't regenerate intentionally deleted paths
@@ -1751,6 +1921,7 @@ def run_copy(
     pretend: bool = False,
     quiet: bool = False,
     unsafe: bool = False,
+    safe_paths: bool = False,
     skip_tasks: bool = False,
     ask: Sequence[str] = (),
 ) -> Worker:
@@ -1780,6 +1951,7 @@ def run_copy(
         pretend=pretend,
         quiet=quiet,
         unsafe=unsafe,
+        safe_paths=safe_paths,
         skip_tasks=skip_tasks,
         ask=ask,
     ) as worker:
@@ -1804,6 +1976,7 @@ def run_recopy(
     pretend: bool = False,
     quiet: bool = False,
     unsafe: bool = False,
+    safe_paths: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
     ask: Sequence[str] = (),
@@ -1833,6 +2006,7 @@ def run_recopy(
         pretend=pretend,
         quiet=quiet,
         unsafe=unsafe,
+        safe_paths=safe_paths,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
         ask=ask,
@@ -1860,6 +2034,7 @@ def run_update(
     conflict: Literal["inline", "rej"] = "inline",
     context_lines: PositiveInt = 3,
     unsafe: bool = False,
+    safe_paths: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
     ask: Sequence[str] = (),
@@ -1891,6 +2066,7 @@ def run_update(
         conflict=conflict,
         context_lines=context_lines,
         unsafe=unsafe,
+        safe_paths=safe_paths,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
         ask=ask,
