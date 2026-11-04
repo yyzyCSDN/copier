@@ -412,6 +412,13 @@ class CopierUpdateSubApp(_Subcommand):
             "accuracy, decrease for resilience."
         ),
     )
+    transactional = cli.Flag(
+        ["--transactional"],
+        help=(
+            "Restore the project to its pre-update state if the update or any "
+            "migration fails"
+        ),
+    )
     defaults = cli.Flag(
         ["-l", "-f", "--defaults"],
         help="Use default answers to questions, which might be null if not specified.",
@@ -458,6 +465,7 @@ class CopierUpdateSubApp(_Subcommand):
                 quiet=self.quiet,
                 conflict=cast(Literal["rej", "inline"], self.conflict),
                 context_lines=self.context_lines,
+                transactional=self.transactional,
                 unsafe=self.unsafe,
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,

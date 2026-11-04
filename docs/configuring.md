@@ -1854,6 +1854,22 @@ without suffix will be ignored.
     Copier 7+ no longer uses the old default independent of
     [min_copier_version](#min_copier_version).
 
+### `transactional`
+
+- Format: `bool`
+- CLI flags: `--transactional` (only available in `copier update` subcommand)
+- Default value: `False`
+
+When `True`, Copier records the project state (paths, file contents, symlinks,
+executable bits and the Git index) before running update pre-migrations. The
+updated project is only published after the whole update and all migrations
+succeed. If any step fails, Copier restores the project to its pre-update state,
+keeping pre-existing changes, untracked files and paths outside the project.
+
+!!! info
+
+    Not supported in `copier.yml`.
+
 ### `unsafe`
 
 - Format: `bool`

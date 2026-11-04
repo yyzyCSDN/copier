@@ -64,6 +64,7 @@ from ._tools import (
     set_git_alternates,
     split_nul,
 )
+from ._transaction import _UpdateTransaction
 from ._types import (
     MISSING,
     AnyByStrDict,
@@ -225,6 +226,12 @@ class Worker:
             With less lines, context resolution is less accurate, but it will
             respect better the evolution of your subproject.
 
+        transactional:
+            When `True`, snapshot the project before updating it and restore it
+            if the update or any migration fails.
+
+            See [transactional][].
+
         unsafe:
             When `True`, allow usage of unsafe templates.
 
@@ -261,6 +268,7 @@ class Worker:
     quiet: bool = False
     conflict: Literal["inline", "rej"] = "inline"
     context_lines: PositiveInt = 3
+    transactional: bool = False
     unsafe: bool = False
     skip_answered: bool = False
     skip_tasks: bool = False
@@ -462,6 +470,7 @@ class Worker:
                 "quiet": lambda: self.quiet,
                 "conflict": lambda: self.conflict,
                 "context_lines": lambda: self.context_lines,
+                "transactional": lambda: self.transactional,
                 "unsafe": lambda: self.unsafe,
                 "skip_answered": lambda: self.skip_answered,
                 "skip_tasks": lambda: self.skip_tasks,
@@ -1352,7 +1361,7 @@ class Worker:
             raise UserMessageError(
                 "Updating is only supported in git-tracked subprojects."
             )
-        if self.subproject.is_dirty():
+        if self.subproject.is_dirty() and not self.transactional:
             raise UserMessageError(
                 "Destination repository is dirty; cannot continue. "
                 "Please commit or stash your local changes and retry."
@@ -1392,7 +1401,29 @@ class Worker:
         self._apply_update()
         self._print_message(self.template.message_after_update)
 
-    def _apply_update(self) -> None:  # noqa: C901
+    def _apply_update(self) -> None:
+        """Apply the update, optionally restoring the project on failure."""
+        if not self.transactional or self.pretend:
+            self._apply_update_untracked()
+            return
+        transaction = _UpdateTransaction(self.subproject.local_abspath)
+        try:
+            transaction.begin()
+        except BaseException:
+            transaction.cleanup()
+            raise
+        try:
+            self._apply_update_untracked()
+        except BaseException as error:
+            failures = transaction.rollback()
+            transaction.cleanup()
+            if failures:
+                _report_rollback_failures(error, failures)
+            raise
+        else:
+            transaction.commit()
+
+    def _apply_update_untracked(self) -> None:  # noqa: C901
         git = get_git()
         subproject_top = Path(
             git.with_cwd(self.subproject.local_abspath)(
@@ -1859,6 +1890,7 @@ def run_update(
     quiet: bool = False,
     conflict: Literal["inline", "rej"] = "inline",
     context_lines: PositiveInt = 3,
+    transactional: bool = False,
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
@@ -1890,6 +1922,7 @@ def run_update(
         quiet=quiet,
         conflict=conflict,
         context_lines=context_lines,
+        transactional=transactional,
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
@@ -1942,6 +1975,22 @@ def get_update_data(
         latest_version = str(worker.template.version)
 
     return (update_available, current_version, latest_version)
+
+
+def _report_rollback_failures(error: BaseException, paths: Sequence[Path]) -> None:
+    """Add rollback context to an update error, without replacing it."""
+    rendered = ", ".join(str(path) for path in paths)
+    note = (
+        "Transactional update failed and the rollback could not restore these "
+        f"paths: {rendered}"
+    )
+    warnings.warn(note, CleanupWarning)
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+    message = getattr(error, "message", None)
+    if isinstance(message, str):
+        error.message = f"{message}\n{note}"  # type: ignore[attr-defined]
 
 
 def _remove_old_files(prefix: Path, cmp: dircmp[str], rm_common: bool = False) -> None:

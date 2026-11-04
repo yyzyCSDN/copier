@@ -209,6 +209,21 @@ path will then be respected again.
 An exception to this behavior applies to paths that are matched by `skip_if_exists`.
 Their presence is always ensured, even during an `update` operation.
 
+### Transactional updates
+
+If an update, a pre-migration or a post-migration fails, the project may be left in a
+partially updated state. Run `copier update --transactional` (or pass
+`transactional=True` to `run_update`) to make the update atomic.
+
+In transactional mode, Copier records the project paths, file contents, symlinks,
+executable bits and Git index before running pre-migrations. The updated project is
+published only after the update and all migrations succeed. If any step fails, Copier
+restores the pre-update state, preserving pre-existing unstaged changes, untracked files
+and paths outside the project. The snapshot is discarded after a successful update.
+
+If the rollback itself fails, the original error is preserved and reports which paths
+could not be restored.
+
 ### Recover from a broken update
 
 Usually Copier will replay the last project generation without problems. However,

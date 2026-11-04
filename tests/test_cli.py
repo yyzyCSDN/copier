@@ -508,6 +508,8 @@ Switches:
                                     exists.
     -s, --skip VALUE:str            Skip specified files if they exist already;
                                     may be given multiple times
+    --transactional                 Restore the project to its pre-update state
+                                    if the update or any migration fails
     -x, --exclude VALUE:str         A name or shell-style pattern matching files
                                     or folders that must not be copied; may be
                                     given multiple times
