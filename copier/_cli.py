@@ -162,6 +162,13 @@ class _Subcommand(cli.Application):
         ["-g", "--prereleases"],
         help="Use prereleases to compare template VCS tags.",
     )
+    offline = cli.Flag(
+        ["--offline"],
+        help=(
+            "Only use the local template cache (`COPIER_CACHE_DIR`) and do not "
+            "contact remote repositories."
+        ),
+    )
     unsafe = cli.Flag(
         ["--UNSAFE", "--trust"],
         help=(
@@ -271,6 +278,7 @@ class CopierCopySubApp(_Subcommand):
                 vcs_ref=try_enum(VcsRef, self.vcs_ref),
                 exclude=self.exclude,
                 use_prereleases=self.prereleases,
+                offline=self.offline,
                 skip_if_exists=self.skip,
                 cleanup_on_error=self.cleanup_on_error,
                 defaults=self.force or self.defaults,
@@ -358,6 +366,7 @@ class CopierRecopySubApp(_Subcommand):
                 vcs_ref=try_enum(VcsRef, self.vcs_ref),
                 exclude=self.exclude,
                 use_prereleases=self.prereleases,
+                offline=self.offline,
                 skip_if_exists=self.skip,
                 defaults=self.force or self.defaults,
                 overwrite=self.force or self.overwrite,
@@ -451,6 +460,7 @@ class CopierUpdateSubApp(_Subcommand):
                 vcs_ref=try_enum(VcsRef, self.vcs_ref),
                 exclude=self.exclude,
                 use_prereleases=self.prereleases,
+                offline=self.offline,
                 skip_if_exists=self.skip,
                 defaults=self.defaults,
                 overwrite=True,

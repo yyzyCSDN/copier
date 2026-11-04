@@ -28,10 +28,14 @@ class Subproject:
 
         answers_relpath:
             Relative path to [the answers file][the-copier-answersyml-file].
+
+        offline:
+            Whether to resolve the original template from the cache only.
     """
 
     local_abspath: AbsolutePath
     answers_relpath: Path = Path(".copier-answers.yml")
+    offline: bool = False
 
     _cleanup_hooks: list[Callable[[], None]] = field(default_factory=list, init=False)
 
@@ -76,7 +80,7 @@ class Subproject:
         last_url = self.last_answers.get("_src_path")
         last_ref = self.last_answers.get("_commit")
         if last_url:
-            result = Template(url=last_url, ref=last_ref)
+            result = Template(url=last_url, ref=last_ref, offline=self.offline)
             self._cleanup_hooks.append(result._cleanup)
             return result
         return None

@@ -239,6 +239,10 @@ class Worker:
         ask:
             List of question names to ask, even if they would be skipped by other
             options. Supports glob-style patterns.
+
+        offline:
+            When `True`, resolve remote templates exclusively from the cache
+            directory (`COPIER_CACHE_DIR`), without any network access.
     """
 
     # NOTE: attributes are fully documented in [creating.md](../docs/creating.md)
@@ -265,6 +269,7 @@ class Worker:
     skip_answered: bool = False
     skip_tasks: bool = False
     ask: Sequence[str] = ()
+    offline: bool = False
 
     answers: AnswersMap = field(default_factory=AnswersMap, init=False)
     _cleanup_hooks: list[Callable[[], None]] = field(default_factory=list, init=False)
@@ -1236,6 +1241,7 @@ class Worker:
         result = Subproject(
             local_abspath=self.dst_path.absolute(),
             answers_relpath=self.answers_file or Path(".copier-answers.yml"),
+            offline=self.offline,
         )
         self._cleanup_hooks.append(result._cleanup)
         return result
@@ -1248,7 +1254,12 @@ class Worker:
                 raise TypeError("Template not found")
             url = str(self.subproject.template.url)
         ref = self.resolved_vcs_ref
-        result = Template(url=url, ref=ref, use_prereleases=self.use_prereleases)
+        result = Template(
+            url=url,
+            ref=ref,
+            use_prereleases=self.use_prereleases,
+            offline=self.offline,
+        )
         self._cleanup_hooks.append(result._cleanup)
         return result
 
@@ -1743,6 +1754,7 @@ def run_copy(
     settings: Settings | SettingsModel | None = None,
     exclude: Sequence[str] = (),
     use_prereleases: bool = False,
+    offline: bool = False,
     skip_if_exists: Sequence[str] = (),
     cleanup_on_error: bool = True,
     defaults: bool = False,
@@ -1772,6 +1784,7 @@ def run_copy(
         ),
         exclude=exclude,
         use_prereleases=use_prereleases,
+        offline=offline,
         skip_if_exists=skip_if_exists,
         cleanup_on_error=cleanup_on_error,
         defaults=defaults,
@@ -1796,6 +1809,7 @@ def run_recopy(
     settings: Settings | SettingsModel | None = None,
     exclude: Sequence[str] = (),
     use_prereleases: bool = False,
+    offline: bool = False,
     skip_if_exists: Sequence[str] = (),
     cleanup_on_error: bool = True,
     defaults: bool = False,
@@ -1825,6 +1839,7 @@ def run_recopy(
         ),
         exclude=exclude,
         use_prereleases=use_prereleases,
+        offline=offline,
         skip_if_exists=skip_if_exists,
         cleanup_on_error=cleanup_on_error,
         defaults=defaults,
@@ -1850,6 +1865,7 @@ def run_update(
     settings: Settings | SettingsModel | None = None,
     exclude: Sequence[str] = (),
     use_prereleases: bool = False,
+    offline: bool = False,
     skip_if_exists: Sequence[str] = (),
     cleanup_on_error: bool = True,
     defaults: bool = False,
@@ -1881,6 +1897,7 @@ def run_update(
         ),
         exclude=exclude,
         use_prereleases=use_prereleases,
+        offline=offline,
         skip_if_exists=skip_if_exists,
         cleanup_on_error=cleanup_on_error,
         defaults=defaults,

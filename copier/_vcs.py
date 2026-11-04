@@ -21,7 +21,7 @@ from plumbum.commands.base import BaseCommand
 
 from ._tools import handle_remove_readonly
 from ._types import OptBool, OptStrOrPath, StrOrPath
-from .errors import DirtyLocalWarning, ShallowCloneWarning
+from .errors import DirtyLocalWarning, ShallowCloneWarning, UserMessageError
 
 GIT_USER_NAME = "Copier"
 GIT_USER_EMAIL = "copier@copier"
@@ -162,7 +162,9 @@ def get_repo(url: str) -> str | None:
     return None
 
 
-def get_latest_tag(url: str, use_prereleases: OptBool = False) -> str:
+def get_latest_tag(
+    url: str, use_prereleases: OptBool = False, offline: bool = False
+) -> str:
     """Get latest git tag, sorted by PEP 440.
 
     Args:
@@ -171,6 +173,9 @@ def get_latest_tag(url: str, use_prereleases: OptBool = False) -> str:
             [get_repo][copier.vcs.get_repo].
         use_prereleases:
             If `False`, skip prerelease git tags.
+        offline:
+            If `True`, list tags from the cached mirror of `url` instead of
+            contacting the remote repository.
 
     Returns:
         The latest git tag, or `HEAD` if no valid tags are found.
@@ -185,10 +190,19 @@ def get_latest_tag(url: str, use_prereleases: OptBool = False) -> str:
     if isinstance(url, _PathStr):
         url = Path(url).resolve().as_posix()
     git = get_git()
-    all_tags = (
-        tag.split("\t", 1)[1].removeprefix("refs/tags/")
-        for tag in git("ls-remote", "--tags", "--refs", "--", url).splitlines()
-    )
+    if offline and _is_remote(url):
+        mirror = _get_mirror(url)
+        all_tags = (
+            ref
+            for ref in git.with_env(GIT_DIR=str(mirror))(
+                "for-each-ref", "--format=%(refname:strip=2)", "refs/tags"
+            ).splitlines()
+        )
+    else:
+        all_tags = (
+            tag.split("\t", 1)[1].removeprefix("refs/tags/")
+            for tag in git("ls-remote", "--tags", "--refs", "--", url).splitlines()
+        )
     all_tags = (tag for tag in all_tags if valid_version(tag))
     if not use_prereleases:
         all_tags = (tag for tag in all_tags if not version.parse(tag).is_prerelease)
@@ -280,6 +294,28 @@ def _is_valid_mirror(mirror: Path) -> bool:
     return out == "true"
 
 
+def _get_mirror(url: str) -> Path:
+    """Return the cached mirror of `url`, without touching the network.
+
+    Args:
+        url: Git-parseable URL of the remote repository.
+
+    Returns:
+        The path to a valid cached mirror.
+
+    Raises:
+        UserMessageError: If the cache entry is missing or corrupt.
+    """
+    mirror = _get_mirror_path(url)
+    if not _is_valid_mirror(mirror):
+        raise UserMessageError(
+            f"Offline mode requires a valid cached repository for {url!r}, "
+            f"but none was found at {mirror}. Populate the cache by running "
+            "Copier online first."
+        )
+    return mirror
+
+
 def _get_or_create_mirror(url: str) -> Path:
     """Get a cached `--mirror` clone of `url`, creating or refreshing it.
 
@@ -323,19 +359,40 @@ def _get_or_create_mirror(url: str) -> Path:
     return mirror
 
 
-def _clone_via_cache(ref: str, location: str, mirror: Path) -> str:
+def _clone_via_cache(
+    ref: str, location: str, mirror: Path, *, offline: bool = False
+) -> str:
     """Create a temporary worktree of `mirror` at `ref` in `location`.
 
     `git worktree add` refuses a path that already exists, so remove the
     pre-allocated (empty) placeholder directory and let git recreate it.
+
+    In offline mode, `ref` is resolved against the cached mirror first so a
+    missing reference produces a clear error, and submodules are not updated
+    because that could reach the network.
     """
     git = get_git()
+    git_with_mirror = git.with_env(GIT_DIR=str(mirror))
+    if offline:
+        try:
+            ref = _resolve_ref(ref, git=git_with_mirror)
+        except ValueError:
+            raise UserMessageError(
+                f"Offline mode: ref {ref!r} does not exist in the cached "
+                f"repository at {mirror}."
+            ) from None
     placeholder = Path(location)
     if placeholder.exists():
         placeholder.rmdir()
-    git.with_env(GIT_DIR=str(mirror))(
-        "worktree", "add", "--detach", "--force", "--", location, ref
-    )
+    try:
+        git_with_mirror("worktree", "add", "--detach", "--force", "--", location, ref)
+    except ProcessExecutionError as error:
+        if offline:
+            raise UserMessageError(
+                f"Offline mode: failed to check out {ref!r} from the cached "
+                f"repository at {mirror}: {error}"
+            ) from error
+        raise
     with local.cwd(location):
         # Worktrees share the mirror's config, so `git submodule update
         # --init` from an earlier checkout may have registered
@@ -344,15 +401,25 @@ def _clone_via_cache(ref: str, location: str, mirror: Path) -> str:
         # submodule moved to a new repository). Synchronizing the submodule URLs
         # ensures that the current `.gitmodules` is used.
         git("submodule", "sync", "--recursive")
-        git("submodule", "update", "--checkout", "--init", "--recursive", "--force")
+        if not offline:
+            git(
+                "submodule",
+                "update",
+                "--checkout",
+                "--init",
+                "--recursive",
+                "--force",
+            )
     return location
 
 
-def _resolve_ref(ref: str) -> str:
+def _resolve_ref(ref: str, git: BaseCommand | None = None) -> str:
     """Resolve `ref` to a commit ID in the current repository.
 
     Args:
         ref: Branch, tag, commit, or other revision to resolve.
+        git: Git command to use. Defaults to the repository in the current
+            working directory.
 
     Returns:
         The full hexadecimal object ID of the commit.
@@ -360,7 +427,7 @@ def _resolve_ref(ref: str) -> str:
     Raises:
         ValueError: If `ref` doesn't resolve to a commit.
     """
-    git = get_git()
+    git = git or get_git()
     # `ref` is passed via stdin, never argv, so it can't be parsed as an option.
     # A newline would split it into multiple revisions.
     if not re.search(r"[\r\n]", ref):
@@ -377,7 +444,13 @@ def _resolve_ref(ref: str) -> str:
     raise ValueError(f"Unknown revision: {ref!r}")
 
 
-def clone(url: str, ref: str = "HEAD", location: str | None = None) -> str:
+def clone(
+    url: str,
+    ref: str = "HEAD",
+    location: str | None = None,
+    *,
+    offline: bool = False,
+) -> str:
     """Clone repo into some temporary destination.
 
     Remote repositories are cached as a local git mirror and checked out into
@@ -396,6 +469,10 @@ def clone(url: str, ref: str = "HEAD", location: str | None = None) -> str:
         location:
             Pre-allocated empty directory to clone into. When `None`, a new
             temporary directory is created.
+        offline:
+            If `True`, only use an existing cached mirror for remote
+            repositories, without any network access. Local templates keep
+            their usual behavior.
     """
     git = get_git()
     git_version = get_git_version()
@@ -403,8 +480,8 @@ def clone(url: str, ref: str = "HEAD", location: str | None = None) -> str:
         location = mkdtemp(prefix=CLONE_PREFIX)
     # Remote templates: use a cached mirror + temporary worktree.
     if _is_remote(url):
-        mirror = _get_or_create_mirror(url)
-        return _clone_via_cache(ref, location, mirror)
+        mirror = _get_mirror(url) if offline else _get_or_create_mirror(url)
+        return _clone_via_cache(ref, location, mirror, offline=offline)
     # Local templates: keep the original clone behavior.
     _clone = git["clone", "--no-checkout"]
     # Faster clones if possible

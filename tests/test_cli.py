@@ -421,6 +421,9 @@ Switches:
     -l, --defaults                  Use default answers to questions, which
                                     might be null if not specified.
     -n, --pretend                   Run but do not make any changes
+    --offline                       Only use the local template cache
+                                    (`COPIER_CACHE_DIR`) and do not contact
+                                    remote repositories.
     -q, --quiet                     Suppress status output
     -r, --vcs-ref VALUE:str         Git reference to checkout in `template_src`.
                                     If you do not specify it, it will try to
@@ -496,6 +499,9 @@ Switches:
     -o, --conflict VALUE:{rej, inline} Behavior on conflict: Create .rej files, or
                                     add inline conflict markers.; the default is
                                     inline
+    --offline                       Only use the local template cache
+                                    (`COPIER_CACHE_DIR`) and do not contact
+                                    remote repositories.
     -q, --quiet                     Suppress status output
     -r, --vcs-ref VALUE:str         Git reference to checkout in `template_src`.
                                     If you do not specify it, it will try to

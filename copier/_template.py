@@ -238,11 +238,16 @@ class Template:
 
             Helpful if you want to test templates before doing a proper release, but you
             need some features that require a proper PEP440 version identifier.
+
+        offline:
+            When `True`, resolve remote templates exclusively from the cache
+            directory (`COPIER_CACHE_DIR`), without any network access.
     """
 
     url: str
     ref: str | None = None
     use_prereleases: bool = False
+    offline: bool = False
     _temp_clone_path: Path | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -584,8 +589,14 @@ class Template:
             result = Path(
                 clone(
                     self.url_expanded,
-                    self.ref or get_latest_tag(self.url_expanded, self.use_prereleases),
+                    self.ref
+                    or get_latest_tag(
+                        self.url_expanded,
+                        self.use_prereleases,
+                        offline=self.offline,
+                    ),
                     location=str(self._temp_clone_path),
+                    offline=self.offline,
                 )
             )
         if not result.is_dir():
