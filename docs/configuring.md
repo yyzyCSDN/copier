@@ -1468,6 +1468,9 @@ Migrations are like [tasks](#tasks), but each item can have additional keys:
     By default, a migration will run in the after upgrade stage.
 - **working_directory** (optional): Specifies the directory in which the command will
     be run. Defaults to the destination directory.
+- **timeout** (optional): Maximum number of seconds the migration may run before it is
+    terminated. Overrides the [`task_timeout`](#task_timeout) setting and the
+    `--task-timeout` CLI flag for this migration only.
 
 If a `str` or `List[str]` is given as a migrator it will be treated as `command` with
 all other items not present.
@@ -1755,6 +1758,34 @@ This allows you to keep separate the template metadata and the template code.
         1.  The configuration from the previous example snippet.
         1.  See [the answers file docs](#the-copier-answersyml-file) to understand.
 
+### `task_timeout`
+
+- Format: `float`
+- CLI flag: `--task-timeout`
+- Default value: `None` (no limit)
+
+Maximum number of seconds a [task](#tasks) or [migration](#migrations) may run before
+it is terminated.
+
+When a task exceeds this limit, Copier terminates the task and all processes it
+started, waits briefly, and then force-kills any remaining processes. It then raises an
+error and stops running further tasks and migrations.
+
+A task can override this value with its own `timeout` key. Precedence is: task
+`timeout` > `--task-timeout` > `_task_timeout`. When neither is set, tasks run
+without a time limit.
+
+!!! example
+
+    ```yaml title="copier.yml"
+    _task_timeout: 30
+
+    _tasks:
+        - "npm install"
+        - command: "npm test"
+          timeout: 120
+    ```
+
 ### `tasks`
 
 - Format: `List[str|List[str]|dict]`
@@ -1772,6 +1803,9 @@ If a `dict` is given it can contain the following items:
 - **when** (optional): Specifies a condition that needs to hold for the task to run.
 - **working_directory** (optional): Specifies the directory in which the command will
     be run. Defaults to the destination directory.
+- **timeout** (optional): Maximum number of seconds the task may run before it is
+    terminated. Overrides the [`task_timeout`](#task_timeout) setting and the
+    `--task-timeout` CLI flag for this task only.
 
 If a `str` or `List[str]` is given as a task it will be treated as `command` with all
 other items not present.

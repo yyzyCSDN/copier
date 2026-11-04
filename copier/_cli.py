@@ -173,6 +173,16 @@ class _Subcommand(cli.Application):
         default=False,
         help="Skip template tasks execution",
     )
+    task_timeout = cli.SwitchAttr(
+        ["--task-timeout"],
+        float,
+        default=None,
+        help=(
+            "Maximum number of seconds a task may run before it is terminated. "
+            "Individual tasks can override this value with their own `timeout`, "
+            "and templates can set a default with `_task_timeout`."
+        ),
+    )
 
     @cli.switch(
         ["-d", "--data"],
@@ -279,6 +289,7 @@ class CopierCopySubApp(_Subcommand):
                 quiet=self.quiet,
                 unsafe=self.unsafe,
                 skip_tasks=self.skip_tasks,
+                task_timeout=self.task_timeout,
                 ask=self.ask,
             )
 
@@ -366,6 +377,7 @@ class CopierRecopySubApp(_Subcommand):
                 unsafe=self.unsafe,
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,
+                task_timeout=self.task_timeout,
                 ask=self.ask,
             )
 
@@ -461,6 +473,7 @@ class CopierUpdateSubApp(_Subcommand):
                 unsafe=self.unsafe,
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,
+                task_timeout=self.task_timeout,
                 ask=self.ask,
             )
 

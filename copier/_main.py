@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -39,7 +40,7 @@ from packaging.version import Version
 from pathspec import PathSpec, __version__ as pathspec_version
 from plumbum import ProcessExecutionError, colors
 from plumbum.machines import local
-from pydantic import ConfigDict, PositiveInt
+from pydantic import ConfigDict, PositiveFloat, PositiveInt
 from pydantic.dataclasses import dataclass
 from pydantic_core import to_jsonable_python
 from questionary import confirm, unsafe_prompt
@@ -85,6 +86,7 @@ from .errors import (
     ForbiddenPathError,
     InteractiveSessionError,
     TaskError,
+    TaskTimeoutError,
     UnsafeTemplateError,
     UserMessageError,
     YieldTagInFileError,
@@ -97,6 +99,67 @@ _operation: ContextVar[Operation] = ContextVar("_operation")
 _pathspec_pattern: Final = (
     "gitignore" if Version(pathspec_version) >= Version("1.0.0") else "gitwildmatch"
 )
+
+# Grace period between terminating a task and force-killing its process tree.
+_TASK_KILL_WAIT: Final = 1.0
+
+
+def _task_process_kwargs() -> dict[str, Any]:
+    """Get `Popen` arguments that make the task process killable as a group."""
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _taskkill(pid: int, *, force: bool) -> None:
+    """Terminate a Windows process tree, optionally forcing termination."""
+    command = ["taskkill", "/PID", str(pid), "/T"]
+    if force:
+        command.insert(1, "/F")
+    with suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+def _terminate_task_process(process: subprocess.Popen[Any]) -> None:
+    """Terminate a task process and its descendants.
+
+    On POSIX, a graceful termination is attempted first, followed by a forced
+    cleanup after a short grace period. On Windows, the whole process tree is
+    force-killed because console applications cannot terminate gracefully.
+    """
+    pid_group: int | None = None
+    if sys.platform == "win32":
+        # Console applications cannot terminate gracefully, so kill the whole
+        # process tree right away.
+        _taskkill(process.pid, force=True)
+    else:
+        try:
+            pid_group = os.getpgid(process.pid)
+        except ProcessLookupError:
+            # The process already exited; descendants still share its group.
+            pid_group = process.pid
+        if pid_group is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(pid_group, signal.SIGTERM)
+
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=_TASK_KILL_WAIT)
+
+    if sys.platform == "win32":
+        if process.poll() is None:
+            with suppress(OSError):
+                process.kill()
+    elif pid_group is not None:
+        with suppress(ProcessLookupError):
+            os.killpg(pid_group, signal.SIGKILL)
+
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=_TASK_KILL_WAIT)
 
 
 def as_operation(value: Operation) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]:
@@ -236,6 +299,12 @@ class Worker:
         skip_tasks:
             When `True`, skip template tasks execution.
 
+        task_timeout:
+            Maximum number of seconds a task may run before it is terminated.
+
+            Individual tasks can override this value with their own `timeout`,
+            and the template can define a default via `_task_timeout`.
+
         ask:
             List of question names to ask, even if they would be skipped by other
             options. Supports glob-style patterns.
@@ -264,6 +333,7 @@ class Worker:
     unsafe: bool = False
     skip_answered: bool = False
     skip_tasks: bool = False
+    task_timeout: PositiveFloat | None = None
     ask: Sequence[str] = ()
 
     answers: AnswersMap = field(default_factory=AnswersMap, init=False)
@@ -392,11 +462,65 @@ class Worker:
         )
         return answers
 
-    def _execute_tasks(self, tasks: Sequence[Task]) -> None:
+    def _task_timeout_for(self, task: Task) -> float | None:
+        """Resolve the timeout for a task.
+
+        A task-specific timeout takes precedence over the command-line/API one,
+        which takes precedence over the template-level `_task_timeout`.
+        """
+        if task.timeout is not None:
+            return task.timeout
+        if self.task_timeout is not None:
+            return self.task_timeout
+        return self.template.task_timeout
+
+    def _run_task_command(
+        self,
+        task_cmd: str | Sequence[str],
+        *,
+        use_shell: bool,
+        timeout: float | None,
+        stage: str,
+        task_number: int,
+    ) -> None:
+        """Run a single task command, enforcing an optional timeout."""
+        env = dict(local.env)
+        if timeout is None:
+            process = subprocess.run(task_cmd, shell=use_shell, check=False, env=env)
+            if process.returncode:
+                raise TaskError.from_process(process)
+            return
+
+        process = subprocess.Popen(
+            task_cmd,
+            shell=use_shell,
+            env=env,
+            **_task_process_kwargs(),
+        )
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_task_process(process)
+            raise TaskTimeoutError(
+                command=task_cmd,
+                timeout=timeout,
+                stage=stage,
+                task_number=task_number,
+            ) from None
+        if returncode:
+            raise TaskError(
+                command=task_cmd,
+                returncode=returncode,
+                stdout=None,
+                stderr=None,
+            )
+
+    def _execute_tasks(self, tasks: Sequence[Task], stage: str = "tasks") -> None:
         """Run the given tasks.
 
         Arguments:
             tasks: The list of tasks to run.
+            stage: The stage the tasks belong to, used in timeout errors.
         """
         operation = _operation.get()
         for i, task in enumerate(tasks):
@@ -434,11 +558,13 @@ class Worker:
 
             extra_env = {k[1:].upper(): str(v) for k, v in extra_context.items()}
             with local.cwd(working_directory), local.env(**extra_env):
-                process = subprocess.run(
-                    task_cmd, shell=use_shell, check=False, env=dict(local.env)
+                self._run_task_command(
+                    task_cmd,
+                    use_shell=use_shell,
+                    timeout=self._task_timeout_for(task),
+                    stage=stage,
+                    task_number=i + 1,
                 )
-                if process.returncode:
-                    raise TaskError.from_process(process)
 
     def _render_context(self) -> AnyByStrMutableMapping:
         """Produce render context for Jinja."""
@@ -1300,7 +1426,7 @@ class Worker:
                 print()  # padding space
             if not self.skip_tasks:
                 with Phase.use(Phase.TASKS):
-                    self._execute_tasks(self.template.tasks)
+                    self._execute_tasks(self.template.tasks, stage="tasks")
         except Exception:
             if not was_existing and self.cleanup_on_error:
                 try:
@@ -1428,7 +1554,8 @@ class Worker:
             # Run pre-migration tasks
             with Phase.use(Phase.MIGRATE):
                 self._execute_tasks(
-                    self.template.migration_tasks("before", self.subproject.template)  # type: ignore[arg-type]
+                    self.template.migration_tasks("before", self.subproject.template),  # type: ignore[arg-type]
+                    stage="before",
                 )
             # Create a Git tree object from the current (possibly dirty) index
             # and keep the object reference.
@@ -1701,7 +1828,8 @@ class Worker:
         # Run post-migration tasks
         with Phase.use(Phase.MIGRATE):
             self._execute_tasks(
-                self.template.migration_tasks("after", self.subproject.template)  # type: ignore[arg-type]
+                self.template.migration_tasks("after", self.subproject.template),  # type: ignore[arg-type]
+                stage="after",
             )
 
     def _git_initialize_repo(self) -> None:
@@ -1752,6 +1880,7 @@ def run_copy(
     quiet: bool = False,
     unsafe: bool = False,
     skip_tasks: bool = False,
+    task_timeout: float | None = None,
     ask: Sequence[str] = (),
 ) -> Worker:
     """Copy a template to a destination, from zero."""
@@ -1781,6 +1910,7 @@ def run_copy(
         quiet=quiet,
         unsafe=unsafe,
         skip_tasks=skip_tasks,
+        task_timeout=task_timeout,
         ask=ask,
     ) as worker:
         worker.run_copy()
@@ -1806,6 +1936,7 @@ def run_recopy(
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
+    task_timeout: float | None = None,
     ask: Sequence[str] = (),
 ) -> Worker:
     """Update a subproject from its template, discarding subproject evolution."""
@@ -1835,6 +1966,7 @@ def run_recopy(
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
+        task_timeout=task_timeout,
         ask=ask,
     ) as worker:
         worker.run_recopy()
@@ -1862,6 +1994,7 @@ def run_update(
     unsafe: bool = False,
     skip_answered: bool = False,
     skip_tasks: bool = False,
+    task_timeout: float | None = None,
     ask: Sequence[str] = (),
 ) -> Worker:
     """Update a subproject, from its template."""
@@ -1893,6 +2026,7 @@ def run_update(
         unsafe=unsafe,
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
+        task_timeout=task_timeout,
         ask=ask,
     ) as worker:
         worker.run_update()

@@ -8,7 +8,11 @@ from plumbum import local
 
 from copier import run_copy, run_update
 from copier._user_data import load_answersfile_data
-from copier.errors import UnsafeTemplateError, UserMessageError
+from copier.errors import (
+    TaskTimeoutError,
+    UnsafeTemplateError,
+    UserMessageError,
+)
 
 from .helpers import (
     BRACKET_ENVOPS,
@@ -605,3 +609,47 @@ def test_copier_phase_variable(tmp_path_factory: pytest.TempPathFactory) -> None
         run_update(defaults=True, overwrite=True, unsafe=True)
 
     assert (dst / "migrate").is_file()
+
+
+@pytest.mark.parametrize("stage", ["before", "after"])
+def test_migration_task_timeout(
+    tmp_path_factory: pytest.TempPathFactory, stage: str
+) -> None:
+    """A timeout stops the current stage and any later migrations."""
+    src, dst = map(tmp_path_factory.mktemp, ("src", "dst"))
+
+    with local.cwd(src):
+        build_file_tree(
+            {
+                **COPIER_ANSWERS_FILE,
+                "copier.yml": (
+                    f"""\
+                    _migrations:
+                    -   command: ["{{{{ _copier_python }}}}", "-c", "import time; time.sleep(30)"]
+                        when: "{{{{ _stage == '{stage}' }}}}"
+                    -   command: ["{{{{ _copier_python }}}}", "-c", "open('{stage}-after-timeout', 'w').close()"]
+                        when: "{{{{ _stage == '{stage}' }}}}"
+                    -   command: ["{{{{ _copier_python }}}}", "-c", "open('after-stage-ran', 'w').close()"]
+                        when: "{{{{ _stage == 'after' }}}}"
+                    """
+                ),
+            }
+        )
+        git_save(tag="v1")
+    with local.cwd(dst):
+        run_copy(src_path=str(src))
+        git_save()
+
+    with local.cwd(src):
+        git("tag", "v2")
+    with local.cwd(dst):
+        with pytest.raises(TaskTimeoutError) as error:
+            run_update(
+                defaults=True,
+                overwrite=True,
+                unsafe=True,
+                task_timeout=0.5,
+            )
+        assert error.value.stage == stage
+        assert not (dst / f"{stage}-after-timeout").exists()
+        assert not (dst / "after-stage-ran").exists()

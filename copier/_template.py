@@ -22,6 +22,7 @@ from funcy import lflatten
 from packaging.version import Version, parse
 from plumbum.commands.processes import ProcessExecutionError
 from plumbum.machines import local
+from pydantic import PositiveFloat
 from pydantic.dataclasses import dataclass
 
 from ._tools import copier_version, handle_remove_readonly, split_nul
@@ -195,12 +196,18 @@ class Task:
         working_directory:
             The directory from inside where to execute the task.
             If `None`, the project directory will be used.
+
+        timeout:
+            Maximum number of seconds the task may run before it is terminated.
+            If `None`, the task runs without a time limit unless a global timeout
+            is configured.
     """
 
     cmd: str | Sequence[str]
     extra_vars: dict[str, Any] = field(default_factory=dict)
     condition: str | bool = True
     working_directory: Path = Path()
+    timeout: PositiveFloat | None = None
 
 
 @dataclass
@@ -466,6 +473,7 @@ class Template:
                             extra_vars=extra_vars,
                             condition=condition,
                             working_directory=working_directory,
+                            timeout=migration.get("timeout"),
                         )
                     )
 
@@ -544,11 +552,21 @@ class Template:
                         extra_vars=extra_vars,
                         condition=task.get("when", "true"),
                         working_directory=Path(task.get("working_directory", ".")),
+                        timeout=task.get("timeout"),
                     )
                 )
             else:
                 tasks.append(Task(cmd=task, extra_vars=extra_vars))
         return tasks
+
+    @cached_property
+    def task_timeout(self) -> float | None:
+        """Get the default timeout for tasks, in seconds.
+
+        See [task_timeout][].
+        """
+        value = self.config_data.get("task_timeout")
+        return None if value is None else float(value)
 
     @cached_property
     def templates_suffix(self) -> str:

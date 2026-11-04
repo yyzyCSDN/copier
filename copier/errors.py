@@ -37,6 +37,7 @@ __all__ = [
     "PathNotRelativeError",
     "ShallowCloneWarning",
     "TaskError",
+    "TaskTimeoutError",
     "UnknownCopierVersionWarning",
     "UnsafeTemplateError",
     "UnsupportedVersionError",
@@ -193,6 +194,34 @@ class TaskError(subprocess.CalledProcessError, UserMessageError):
             returncode=process.returncode,
             stdout=process.stdout,
             stderr=process.stderr,
+        )
+
+
+class TaskTimeoutError(UserMessageError):
+    """Exception raised when a task exceeds its configured timeout.
+
+    Attributes:
+        command: The command that timed out.
+        timeout: The timeout, in seconds, that was exceeded.
+        stage: The stage in which the task was running.
+        task_number: The 1-based position of the task within its stage.
+    """
+
+    def __init__(
+        self,
+        *,
+        command: str | Sequence[str],
+        timeout: float,
+        stage: str,
+        task_number: int,
+    ) -> None:
+        self.command = command
+        self.timeout = timeout
+        self.stage = stage
+        self.task_number = task_number
+        super().__init__(
+            f"Task {task_number} of stage {stage!r} timed out after "
+            f"{timeout} seconds: {command!r}"
         )
 
 
