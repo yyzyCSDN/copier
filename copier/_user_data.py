@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from collections import ChainMap
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import field
 from datetime import UTC, datetime
 from functools import cached_property
-from hashlib import sha512
+from hashlib import sha256, sha512
 from os import urandom
 from pathlib import Path
+from tempfile import mkstemp
 from typing import Any, Literal
 
 import yaml
@@ -36,7 +39,12 @@ from ._types import (
     MissingType,
     StrOrPath,
 )
-from .errors import InvalidTypeError, MissingFileWarning, UserMessageError
+from .errors import (
+    InvalidAnswersLockError,
+    InvalidTypeError,
+    MissingFileWarning,
+    UserMessageError,
+)
 
 
 # TODO Remove these two functions as well as DEFAULT_DATA in a future release
@@ -610,6 +618,113 @@ def load_answersfile_data(
                 MissingFileWarning,
             )
         return {}
+
+
+_ANSWERS_LOCK_SUFFIX = ".lock"
+_ANSWERS_LOCK_VERSION = 1
+
+
+def _answers_lock_path(answers_path: StrOrPath) -> Path:
+    """Return the companion lock file path for an answers file."""
+    answers_path = Path(answers_path)
+    return answers_path.with_name(answers_path.name + _ANSWERS_LOCK_SUFFIX)
+
+
+def _normalize_answer_value(value: Any) -> Any:
+    """Convert an answer value to a deterministic, JSON-serializable structure."""
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_answer_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_answer_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_normalize_answer_value(item) for item in value), key=repr)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _answer_digest(value: Any) -> str:
+    """Return a deterministic digest for an answer value."""
+    normalized = json.dumps(
+        _normalize_answer_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _answer_digests(
+    answers: Mapping[str, Any], secret_questions: Iterable[str] = ()
+) -> dict[str, str]:
+    """Return per-question digests, excluding metadata and secret answers."""
+    secrets = set(secret_questions)
+    return {
+        str(key): _answer_digest(value)
+        for key, value in answers.items()
+        if not str(key).startswith("_") and str(key) not in secrets
+    }
+
+
+def _changed_answer_keys(
+    expected: Mapping[str, str], actual: Mapping[str, str]
+) -> list[str]:
+    """Return the question keys whose digests differ between two mappings."""
+    return sorted(
+        key
+        for key in set(expected) | set(actual)
+        if expected.get(key) != actual.get(key)
+    )
+
+
+def _load_answers_lock(path: StrOrPath) -> AnyByStrDict:
+    """Load and validate an answers lock file.
+
+    Raises:
+        InvalidAnswersLockError: If the file is missing, unreadable, or malformed.
+    """
+    path = Path(path)
+    try:
+        data = yaml.safe_load(path.read_bytes())
+    except (OSError, yaml.YAMLError) as error:
+        raise InvalidAnswersLockError(path) from error
+    if not isinstance(data, Mapping) or data.get("version") != _ANSWERS_LOCK_VERSION:
+        raise InvalidAnswersLockError(path)
+    digests = data.get("digests")
+    if not isinstance(digests, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in digests.items()
+    ):
+        raise InvalidAnswersLockError(path)
+    return dict(data)
+
+
+def _write_answers_lock(
+    path: StrOrPath,
+    *,
+    digests: Mapping[str, str],
+    source: str | None,
+    commit: str | None,
+) -> None:
+    """Atomically write an answers lock file."""
+    path = Path(path)
+    payload = {
+        "version": _ANSWERS_LOCK_VERSION,
+        "source": source,
+        "commit": commit,
+        "digests": dict(sorted(digests.items())),
+    }
+    content = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(content)
+        Path(temporary).replace(path)
+    except BaseException:
+        with suppress(OSError):
+            Path(temporary).unlink()
+        raise
 
 
 CAST_STR_TO_NATIVE: Mapping[str, Callable[[str], Any]] = {

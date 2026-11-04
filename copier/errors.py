@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # always false
     from ._user_data import AnswersMap, Question
 
 __all__ = [
+    "AnswersDriftError",
     "CleanupWarning",
     "ConfigFileError",
     "CopierAnswersInterrupt",
@@ -25,6 +26,7 @@ __all__ = [
     "ExtensionNotFoundError",
     "ForbiddenPathError",
     "InteractiveSessionError",
+    "InvalidAnswersLockError",
     "InvalidConfigFileError",
     "InvalidTypeError",
     "MissingFileWarning",
@@ -62,6 +64,31 @@ class UserMessageError(CopierError):
 
 class UnsupportedVersionError(UserMessageError):
     """Copier version does not support template version."""
+
+
+class AnswersDriftError(UserMessageError):
+    """The answers file no longer matches its companion lock file."""
+
+    def __init__(self, changed_keys: Sequence[str]) -> None:
+        self.changed_keys = sorted(changed_keys)
+        keys = ", ".join(self.changed_keys)
+        super().__init__(
+            f"Answers file drift detected in question keys: {keys}.\n"
+            "The answers file was modified after the answers lock was recorded. "
+            "Review the changes and rerun with '--accept-answers-drift' "
+            "(API: 'accept_answers_drift=True') to keep them."
+        )
+
+
+class InvalidAnswersLockError(UserMessageError):
+    """The answers lock file is unreadable or has an unsupported format."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"Answers lock file is corrupt or has an unsupported format: {path}.\n"
+            "Rerun with '--accept-answers-drift' (API: 'accept_answers_drift=True') "
+            "to recreate it after a successful operation."
+        )
 
 
 class ConfigFileError(ValueError, CopierError):

@@ -173,6 +173,20 @@ class _Subcommand(cli.Application):
         default=False,
         help="Skip template tasks execution",
     )
+    protect_answers = cli.Flag(
+        ["--protect-answers"],
+        help=(
+            "Record an answers lock file after successful operations and verify "
+            "the answers file against it before subsequent operations"
+        ),
+    )
+    accept_answers_drift = cli.Flag(
+        ["--accept-answers-drift"],
+        help=(
+            "Allow an operation to continue despite answers file drift and "
+            "refresh the answers lock file"
+        ),
+    )
 
     @cli.switch(
         ["-d", "--data"],
@@ -280,6 +294,8 @@ class CopierCopySubApp(_Subcommand):
                 unsafe=self.unsafe,
                 skip_tasks=self.skip_tasks,
                 ask=self.ask,
+                protect_answers=self.protect_answers,
+                accept_answers_drift=self.accept_answers_drift,
             )
 
         return _handle_exceptions(inner)
@@ -367,6 +383,8 @@ class CopierRecopySubApp(_Subcommand):
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,
                 ask=self.ask,
+                protect_answers=self.protect_answers,
+                accept_answers_drift=self.accept_answers_drift,
             )
 
         return _handle_exceptions(inner)
@@ -462,6 +480,8 @@ class CopierUpdateSubApp(_Subcommand):
                 skip_answered=self.skip_answered,
                 skip_tasks=self.skip_tasks,
                 ask=self.ask,
+                protect_answers=self.protect_answers,
+                accept_answers_drift=self.accept_answers_drift,
             )
 
         return _handle_exceptions(inner)

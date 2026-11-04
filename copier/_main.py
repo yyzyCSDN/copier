@@ -75,9 +75,19 @@ from ._types import (
     RelativePath,
     VcsRef,
 )
-from ._user_data import AnswersMap, Question, load_answersfile_data
+from ._user_data import (
+    AnswersMap,
+    Question,
+    _answer_digests,
+    _answers_lock_path,
+    _changed_answer_keys,
+    _load_answers_lock,
+    _write_answers_lock,
+    load_answersfile_data,
+)
 from ._vcs import get_git, is_git_available
 from .errors import (
+    AnswersDriftError,
     CleanupWarning,
     ConfigFileError,
     CopierAnswersInterrupt,
@@ -239,6 +249,14 @@ class Worker:
         ask:
             List of question names to ask, even if they would be skipped by other
             options. Supports glob-style patterns.
+
+        protect_answers:
+            When `True`, write a companion answers lock file after successful
+            operations and verify it before subsequent operations.
+
+        accept_answers_drift:
+            When `True`, allow an operation to continue despite answers file
+            drift and refresh the companion answers lock file.
     """
 
     # NOTE: attributes are fully documented in [creating.md](../docs/creating.md)
@@ -265,6 +283,8 @@ class Worker:
     skip_answered: bool = False
     skip_tasks: bool = False
     ask: Sequence[str] = ()
+    protect_answers: bool = False
+    accept_answers_drift: bool = False
 
     answers: AnswersMap = field(default_factory=AnswersMap, init=False)
     _cleanup_hooks: list[Callable[[], None]] = field(default_factory=list, init=False)
@@ -391,6 +411,46 @@ class Worker:
             and isinstance(v, JSONSerializable)
         )
         return answers
+
+    def _check_answers_drift(self) -> None:
+        """Stop if the answers file no longer matches its companion lock file."""
+        if self.pretend or not self.protect_answers:
+            return
+        lock_path = _answers_lock_path(self.dst_path / self.answers_relpath)
+        if not lock_path.is_file():
+            return
+        if self.accept_answers_drift:
+            return
+        secrets = self.template.secret_questions
+        expected = {
+            key: digest
+            for key, digest in _load_answers_lock(lock_path)["digests"].items()
+            if key not in secrets
+        }
+        answers = load_answersfile_data(self.dst_path, self.answers_relpath)
+        if not isinstance(answers, Mapping):
+            answers = {}
+        actual = _answer_digests(answers, secrets)
+        changed = _changed_answer_keys(expected, actual)
+        if changed:
+            raise AnswersDriftError(changed)
+
+    def _write_answers_lock(self) -> None:
+        """Write the companion answers lock file after a successful operation."""
+        if self.pretend or not self.protect_answers:
+            return
+        answers_path = self.dst_path / self.answers_relpath
+        if not answers_path.is_file():
+            return
+        answers = load_answersfile_data(self.dst_path, self.answers_relpath)
+        if not isinstance(answers, Mapping):
+            answers = {}
+        _write_answers_lock(
+            _answers_lock_path(answers_path),
+            digests=_answer_digests(answers, self.template.secret_questions),
+            source=answers.get("_src_path"),
+            commit=answers.get("_commit"),
+        )
 
     def _execute_tasks(self, tasks: Sequence[Task]) -> None:
         """Run the given tasks.
@@ -1282,6 +1342,7 @@ class Worker:
             del self.match_exclude
 
         self._check_unsafe("copy")
+        self._check_answers_drift()
         self._print_message(self.template.message_before_copy)
         with Phase.use(Phase.PROMPT):
             self._ask()
@@ -1316,6 +1377,7 @@ class Worker:
                     )
             raise
         self._print_message(self.template.message_after_copy)
+        self._write_answers_lock()
         if not self.quiet:
             # TODO Unify printing tools
             print()  # padding space
@@ -1382,6 +1444,7 @@ class Worker:
             # review the diff before committing; so we can safely avoid
             # asking for confirmation
             raise UserMessageError("Enable overwrite to update a subproject.")
+        self._check_answers_drift()
         self._print_message(self.template.message_before_update)
         self._print_template_update_info(self.subproject.template)
         with suppress(AttributeError):
@@ -1391,6 +1454,7 @@ class Worker:
 
         self._apply_update()
         self._print_message(self.template.message_after_update)
+        self._write_answers_lock()
 
     def _apply_update(self) -> None:  # noqa: C901
         git = get_git()
@@ -1423,6 +1487,8 @@ class Worker:
                 # https://github.com/orgs/copier-org/discussions/2345
                 exclude=[*self.template.exclude, *self.exclude],
                 ask=(),
+                protect_answers=False,
+                accept_answers_drift=False,
             ) as old_worker:
                 old_worker.run_copy()
             # Run pre-migration tasks
@@ -1472,6 +1538,8 @@ class Worker:
                 # say nothing than lie.
                 # TODO
                 quiet=True,
+                protect_answers=False,
+                accept_answers_drift=False,
             ) as current_worker:
                 current_worker.run_copy()
                 self.answers = current_worker.answers
@@ -1496,6 +1564,8 @@ class Worker:
                 src_path=self.subproject.template.url,  # type: ignore[union-attr]
                 vcs_ref=self.resolved_vcs_ref,
                 ask=(),
+                protect_answers=False,
+                accept_answers_drift=False,
             ) as new_worker:
                 new_worker.run_copy()
             # Don't regenerate intentionally deleted paths
@@ -1753,6 +1823,8 @@ def run_copy(
     unsafe: bool = False,
     skip_tasks: bool = False,
     ask: Sequence[str] = (),
+    protect_answers: bool = False,
+    accept_answers_drift: bool = False,
 ) -> Worker:
     """Copy a template to a destination, from zero."""
     with Worker(
@@ -1782,6 +1854,8 @@ def run_copy(
         unsafe=unsafe,
         skip_tasks=skip_tasks,
         ask=ask,
+        protect_answers=protect_answers,
+        accept_answers_drift=accept_answers_drift,
     ) as worker:
         worker.run_copy()
     return worker
@@ -1807,6 +1881,8 @@ def run_recopy(
     skip_answered: bool = False,
     skip_tasks: bool = False,
     ask: Sequence[str] = (),
+    protect_answers: bool = False,
+    accept_answers_drift: bool = False,
 ) -> Worker:
     """Update a subproject from its template, discarding subproject evolution."""
     with Worker(
@@ -1836,6 +1912,8 @@ def run_recopy(
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
         ask=ask,
+        protect_answers=protect_answers,
+        accept_answers_drift=accept_answers_drift,
     ) as worker:
         worker.run_recopy()
     return worker
@@ -1863,6 +1941,8 @@ def run_update(
     skip_answered: bool = False,
     skip_tasks: bool = False,
     ask: Sequence[str] = (),
+    protect_answers: bool = False,
+    accept_answers_drift: bool = False,
 ) -> Worker:
     """Update a subproject, from its template."""
     with Worker(
@@ -1894,6 +1974,8 @@ def run_update(
         skip_answered=skip_answered,
         skip_tasks=skip_tasks,
         ask=ask,
+        protect_answers=protect_answers,
+        accept_answers_drift=accept_answers_drift,
     ) as worker:
         worker.run_update()
     return worker
